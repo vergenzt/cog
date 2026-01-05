@@ -572,8 +572,8 @@ class Cog(Redirectable):
             self.prout(f"Cog version {__version__}")
             return
 
-        if self.options.args:
-            for a in self.options.args:
+        if self.options.files:
+            for a in self.options.files:
                 self.process_arguments([a])
         else:
             raise CogUsageError("No files to process")

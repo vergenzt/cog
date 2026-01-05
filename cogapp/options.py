@@ -2,15 +2,20 @@ import argparse
 import copy
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+import shlex
+import sys
+from fileinput import FileInput
 from textwrap import dedent
-from typing import ClassVar, Dict, List, NoReturn, Optional
+from typing import Callable, ClassVar, Iterator, NoReturn
 
 from .errors import CogUsageError
 
-description = """\
+files_metavar = "[INFILE | @FILELIST | &FILELIST] ..."
+description = f"""\
 cog - generate content with inlined Python code.
 
-cog [OPTIONS] [INFILE | @FILELIST | &FILELIST] ...
+cog [OPTIONS] {files_metavar}
 """
 
 
@@ -22,6 +27,7 @@ class _NonEarlyExitingArgumentParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         raise CogUsageError(message)
+
 
 
 def _parse_define(arg):
@@ -60,14 +66,17 @@ class CogOptions:
         prog="cog",
         usage=argparse.SUPPRESS,
         description=description,
+        add_help=False,
         exit_on_error=False,  # doesn't always work until 3.12+; see workaround above
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    args: List[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
     _parser.add_argument(
         "args",
-        metavar="[INFILE | @FILELIST | &FILELIST]",
+        metavar=files_metavar,
+        type=_parse_file_arg,
+        action="extend",
         nargs=argparse.ZERO_OR_MORE,
         help=dedent("""
             FILELIST is the name of a text file containing file names or
@@ -95,7 +104,7 @@ class CogOptions:
         help="Delete the Python code from the output file.",
     )
 
-    defines: Dict[str, str] = field(default_factory=dict)
+    defines: dict[str, str] = field(default_factory=dict)
     _parser.add_argument(
         "-D",
         dest="defines",
@@ -113,7 +122,7 @@ class CogOptions:
         help="Warn if a file has no cog code in it.",
     )
 
-    include_path: List[str] = field(default_factory=list)
+    include_path: list[str] = field(default_factory=list)
     _parser.add_argument(
         "-I",
         dest="include_path",
@@ -131,7 +140,7 @@ class CogOptions:
         help="Use ENCODING when reading and writing files.",
     )
 
-    output_name: Optional[str] = None
+    output_name: str | None = None
     _parser.add_argument(
         "-o",
         dest="output_name",
@@ -165,7 +174,7 @@ class CogOptions:
         help="Replace the input file with the output.",
     )
 
-    suffix: Optional[str] = None
+    suffix: str | None = None
     _parser.add_argument(
         "-s",
         dest="suffix",
@@ -182,7 +191,7 @@ class CogOptions:
         help="Write the output with Unix newlines (only LF line-endings).",
     )
 
-    make_writable_cmd: Optional[str] = None
+    make_writable_cmd: str | None = None
     _parser.add_argument(
         "-w",
         dest="make_writable_cmd",
@@ -245,7 +254,7 @@ class CogOptions:
         type=Markers.from_arg,
         help=dedent("""
             The patterns surrounding cog inline instructions. Should include three
-            values separated by spaces, the start, end, and end-output markers.
+            values separated by spaces: the start, end, and end-output markers.
             Defaults to '[[[cog ]]] [[[end]]]'.
         """),
     )
@@ -265,6 +274,7 @@ class CogOptions:
         """),
     )
 
+    _parser.add_argument("-h", "--help", action="help", help="Print this help.")
     _parser.add_argument("-?", action="help", help=argparse.SUPPRESS)
 
     def clone(self):
@@ -275,19 +285,43 @@ class CogOptions:
         """Get help text for command line options"""
         return self._parser.format_help()
 
-    def parse_args(self, argv: List[str]):
+    def parse_args(self, argv: list[str]):
         try:
             self._parser.parse_args(argv, namespace=self)
         except argparse.ArgumentError as err:
             raise CogUsageError(str(err))
 
         if self.replace and self.delete_code:
-            raise CogUsageError(
-                "Can't use -d with -r (or you would delete all your source!)"
-            )
+            raise CogUsageError("Can't use -d with -r (or you would delete all your source!)")
 
         if self.replace and self.output_name:
             raise CogUsageError("Can't use -o with -r (they are opposites)")
 
         if self.diff and not self.check:
             raise CogUsageError("Can't use --diff without --check")
+
+
+def _parse_file_arg(arg: str) -> Iterator[FileInput | Callable[["CogOptions"], "CogOptions"]]:
+    match arg[0], arg[1:]:
+        case ("@" | "&") as filelist_type, filelist_str:
+            filelist = Path(filelist_str)
+            basedir = {"@": Path.cwd(), "&": filelist.parent}[filelist_type]
+
+            def filelist_reader(parent: "CogOptions") -> Iterator["CogOptions"]:
+                # builtin FileInput handles translating "-" to stdin
+                with FileInput(filelist, encoding=parent.encoding) as fileinput:
+                    for fileline in fileinput:
+                        # Use shlex to parse the line like a shell.
+                        lex = shlex.shlex(line, posix=True)
+                        lex.whitespace_split = True
+                        lex.commenters = "#"
+                        # No escapes, so that backslash can be part of the path
+                        lex.escape = ""
+                        args = list(lex)
+                        
+    
+
+                
+
+        case _:
+            ...
