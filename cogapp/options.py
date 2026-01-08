@@ -1,21 +1,34 @@
 import argparse
+import contextlib
 import copy
+from enum import Enum, StrEnum, auto
+from fileinput import FileInput, isstdin
+import glob
 import os
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from pathlib import Path
 import shlex
 import sys
-from fileinput import FileInput
 from textwrap import dedent
-from typing import Callable, ClassVar, Iterator, NoReturn
+from types import MethodType
+from typing import (
+    ClassVar,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    NoReturn,
+    Optional,
+    TextIO,
+    TypeVar,
+)
 
 from .errors import CogUsageError
 
-files_metavar = "[INFILE | @FILELIST | &FILELIST] ..."
-description = f"""\
+description = """\
 cog - generate content with inlined Python code.
 
-cog [OPTIONS] {files_metavar}
+cog [OPTIONS] [INFILE | @FILELIST | &FILELIST] ...
 """
 
 
@@ -29,14 +42,20 @@ class _NonEarlyExitingArgumentParser(argparse.ArgumentParser):
         raise CogUsageError(message)
 
 
-
-def _parse_define(arg):
-    if arg.count("=") < 1:
-        raise argparse.ArgumentTypeError("takes a name=value argument")
-    return arg.split("=", 1)
-
-
 class _UpdateDictAction(argparse.Action):
+    """
+    Updates dest with dictionary values for each `<key>=<value>` argument.
+    """
+
+    @staticmethod
+    def _parse_define(arg):
+        if arg.count("=") < 1:
+            raise argparse.ArgumentTypeError("takes a name=value argument")
+        return arg.split("=", 1)
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw, type=self._parse_define)
+
     def __call__(self, _parser, ns, arg, _option_string=None):
         getattr(ns, self.dest).update([arg])
 
@@ -58,7 +77,31 @@ class Markers:
         return cls(*parts)
 
 
-@dataclass
+class FileListType(StrEnum):
+    PLAIN = "@"
+    CHDIR = "&"
+
+
+@dataclass(frozen=True)
+class CogInput:
+    filestr: str
+    filelist_type: FileListType | None = None
+
+    @classmethod
+    def from_arg(cls, filearg: str) -> "CogInput":
+        if filearg[0] in FileListType:
+            return cls(filearg[1:], FileListType(filearg[0]))
+        else:
+            return cls(filearg)
+
+
+@dataclass(frozen=True)
+class CogResolvedInput:
+    filename: str
+    options: "CogOptions"
+
+
+@dataclass(frozen=True)
 class CogOptions:
     """Options for a run of cog."""
 
@@ -66,18 +109,16 @@ class CogOptions:
         prog="cog",
         usage=argparse.SUPPRESS,
         description=description,
-        add_help=False,
         exit_on_error=False,  # doesn't always work until 3.12+; see workaround above
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    files: list[str] = field(default_factory=list)
+    inputs: List[CogInput] = field(default_factory=list)
     _parser.add_argument(
-        "args",
-        metavar=files_metavar,
-        type=_parse_file_arg,
-        action="extend",
+        "inputs",
+        metavar="[INFILE | @FILELIST | &FILELIST]",
         nargs=argparse.ZERO_OR_MORE,
+        type=CogInput.from_arg,
         help=dedent("""
             FILELIST is the name of a text file containing file names or
             other @FILELISTs.
@@ -87,6 +128,9 @@ class CogOptions:
             list are relative to the file list location."
         """),
     )
+
+    # add unexposed chdir option to support &FILELIST args
+    chdir: Path = Path(".")
 
     hash_output: bool = False
     _parser.add_argument(
@@ -104,11 +148,10 @@ class CogOptions:
         help="Delete the Python code from the output file.",
     )
 
-    defines: dict[str, str] = field(default_factory=dict)
+    defines: Dict[str, str] = field(default_factory=dict)
     _parser.add_argument(
         "-D",
         dest="defines",
-        type=_parse_define,
         metavar="name=val",
         action=_UpdateDictAction,
         help="Define a global string available to your Python code.",
@@ -122,7 +165,7 @@ class CogOptions:
         help="Warn if a file has no cog code in it.",
     )
 
-    include_path: list[str] = field(default_factory=list)
+    include_path: List[str] = field(default_factory=list)
     _parser.add_argument(
         "-I",
         dest="include_path",
@@ -140,7 +183,7 @@ class CogOptions:
         help="Use ENCODING when reading and writing files.",
     )
 
-    output_name: str | None = None
+    output_name: Optional[str] = None
     _parser.add_argument(
         "-o",
         dest="output_name",
@@ -174,7 +217,7 @@ class CogOptions:
         help="Replace the input file with the output.",
     )
 
-    suffix: str | None = None
+    suffix: Optional[str] = None
     _parser.add_argument(
         "-s",
         dest="suffix",
@@ -191,7 +234,7 @@ class CogOptions:
         help="Write the output with Unix newlines (only LF line-endings).",
     )
 
-    make_writable_cmd: str | None = None
+    make_writable_cmd: Optional[str] = None
     _parser.add_argument(
         "-w",
         dest="make_writable_cmd",
@@ -254,7 +297,7 @@ class CogOptions:
         type=Markers.from_arg,
         help=dedent("""
             The patterns surrounding cog inline instructions. Should include three
-            values separated by spaces: the start, end, and end-output markers.
+            values separated by spaces, the start, end, and end-output markers.
             Defaults to '[[[cog ]]] [[[end]]]'.
         """),
     )
@@ -274,54 +317,83 @@ class CogOptions:
         """),
     )
 
-    _parser.add_argument("-h", "--help", action="help", help="Print this help.")
     _parser.add_argument("-?", action="help", help=argparse.SUPPRESS)
 
-    def clone(self):
-        """Make a clone of these options, for further refinement."""
-        return copy.deepcopy(self)
-
-    def format_help(self):
+    @classmethod
+    def format_help(cls):
         """Get help text for command line options"""
-        return self._parser.format_help()
+        return cls._parser.format_help()
 
-    def parse_args(self, argv: list[str]):
+    @classmethod
+    def from_args(cls, argv: List[str]) -> "CogOptions":
         try:
-            self._parser.parse_args(argv, namespace=self)
+            args = cls._parser.parse_args(argv)
+            return cls(**args.__dict__)
         except argparse.ArgumentError as err:
             raise CogUsageError(str(err))
 
+    def __post_init__(self):
         if self.replace and self.delete_code:
-            raise CogUsageError("Can't use -d with -r (or you would delete all your source!)")
+            raise CogUsageError(
+                "Can't use -d with -r (or you would delete all your source!)"
+            )
 
         if self.replace and self.output_name:
             raise CogUsageError("Can't use -o with -r (they are opposites)")
 
+        if self.output_name and any(f.filelist_type for f in self.inputs):
+            type = next((f.filelist_type for f in self.inputs if f.filelist_type), None)
+            raise CogUsageError(f"Can't use -o with {type}file")
+
         if self.diff and not self.check:
             raise CogUsageError("Can't use --diff without --check")
 
+    def resolved_inputs(self) -> Iterator[CogResolvedInput]:
+        """
+        Get concrete files to process for cog snippets, paired with their options. Resolves FILELIST
+        arguments by reading & parsing their lines options.
 
-def _parse_file_arg(arg: str) -> Iterator[FileInput | Callable[["CogOptions"], "CogOptions"]]:
-    match arg[0], arg[1:]:
-        case ("@" | "&") as filelist_type, filelist_str:
-            filelist = Path(filelist_str)
-            basedir = {"@": Path.cwd(), "&": filelist.parent}[filelist_type]
+        Be sure to `os.chdir` into the value of `CogOptions.chdir` (if it's not `.`) before
+        processing the resolved inputs.
+        """
+        for input in self.inputs:
+            yield from self._resolve_input(input)
 
-            def filelist_reader(parent: "CogOptions") -> Iterator["CogOptions"]:
-                # builtin FileInput handles translating "-" to stdin
-                with FileInput(filelist, encoding=parent.encoding) as fileinput:
-                    for fileline in fileinput:
-                        # Use shlex to parse the line like a shell.
-                        lex = shlex.shlex(line, posix=True)
-                        lex.whitespace_split = True
-                        lex.commenters = "#"
-                        # No escapes, so that backslash can be part of the path
-                        lex.escape = ""
-                        args = list(lex)
-                        
-    
+    def _resolve_input(self, input: CogInput) -> Iterator[CogResolvedInput]:
+        match input:
+            case CogInput(filelist, FileListType.PLAIN):
+                yield from self._resolve_filelist(filelist)
+            case CogInput(filelist, FileListType.CHDIR):
+                dir, name = os.path.split(filelist)
+                from_dir = replace(self, chdir=self.chdir / dir)
+                yield from from_dir._resolve_input(CogInput(name, FileListType.PLAIN))
+            case CogInput("-"):
+                yield CogResolvedInput("-", self)
+            case CogInput(filestr):
+                files = glob.glob(filestr, root_dir=self.chdir) or [filestr]
+                for file in files:
+                    dir = os.path.dirname(file)
+                    with_file_dir_included = replace(
+                        self, include_path=self.include_path + [dir]
+                    )
+                    yield CogResolvedInput(file, with_file_dir_included)
 
-                
+    def _resolve_filelist(self, filelist: str) -> Iterator[CogResolvedInput]:
+        curopts_empty_input = replace(self, inputs=[])
+        with open(filelist, encoding=self.encoding) as filelist_in:
+            for line in filelist_in:
+                argv = _lex_filelist_line(line)
+                if argv:
+                    args = self._parser.parse_args(argv)
+                    line_opts = replace(curopts_empty_input, **args.__dict__)
+                    yield from line_opts.resolved_inputs()
 
-        case _:
-            ...
+
+def _lex_filelist_line(line: str) -> list[str]:
+    # Use shlex to parse the line like a shell.
+    lex = shlex.shlex(line, posix=True)
+    lex.whitespace_split = True
+    lex.commenters = "#"
+    # No escapes, so that backslash can be part of the path
+    lex.escape = ""
+    return list(lex)

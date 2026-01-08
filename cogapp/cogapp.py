@@ -1,6 +1,7 @@
 """Cog content generation tool."""
 
 import difflib
+from fileinput import FileInput
 import glob
 import io
 import linecache
@@ -18,7 +19,7 @@ from .errors import (
     CogUsageError,
     CogUserException,
 )
-from .options import CogOptions
+from .options import CogOptions, CogResolvedInput
 from .whiteutils import common_prefix, reindent_block, white_prefix
 from .utils import NumberedFileReader, Redirectable, change_dir, md5
 from .hashhandler import HashHandler
@@ -139,7 +140,6 @@ class Cog(Redirectable):
 
     def __init__(self):
         super().__init__()
-        self.options = CogOptions()
         self.cogmodulename = "cog"
         self.create_cog_module()
         self.check_failed = False
@@ -180,13 +180,6 @@ class Cog(Redirectable):
         if os.path.dirname(fdir) and not os.path.exists(fdir):
             os.makedirs(fdir)
         return open(fname, mode, **opts)
-
-    def open_input_file(self, fname):
-        """Open an input file."""
-        if fname == "-":
-            return sys.stdin
-        else:
-            return open(fname, encoding=self.options.encoding)
 
     def process_file(self, file_in, file_out, fname=None, globals=None):
         """Process an input file object to an output file object.
@@ -430,23 +423,9 @@ class Cog(Redirectable):
         f.write(new_text)
         f.close()
 
-    def save_include_path(self):
-        self.saved_include = self.options.include_path[:]
-        self.saved_sys_path = sys.path[:]
-
-    def restore_include_path(self):
-        self.options.include_path = self.saved_include
-        self.cogmodule.path = self.options.include_path
-        sys.path = self.saved_sys_path
-
-    def add_to_include_path(self, include_path):
-        self.cogmodule.path.extend(include_path)
-        sys.path.extend(include_path)
-
-    def process_one_file(self, fname):
+    def process_one_file(self, file: CogResolvedInput):
         """Process one filename through cog."""
 
-        self.save_include_path()
         need_newline = False
 
         try:
@@ -506,14 +485,6 @@ class Cog(Redirectable):
         finally:
             self.restore_include_path()
 
-    def process_wildcards(self, fname):
-        files = glob.glob(fname)
-        if files:
-            for matching_file in files:
-                self.process_one_file(matching_file)
-        else:
-            self.process_one_file(fname)
-
     def process_file_list(self, file_name_list):
         """Process the files in a file list."""
         flist = self.open_input_file(file_name_list)
@@ -562,7 +533,7 @@ class Cog(Redirectable):
 
         # Provide help if asked for anywhere in the command line.
         if "-?" in argv or "-h" in argv or "--help" in argv:
-            self.prerr(self.options.format_help(), end="")
+            self.prerr(CogOptions.format_help(), end="")
             return
 
         self.options.parse_args(argv)
@@ -572,8 +543,8 @@ class Cog(Redirectable):
             self.prout(f"Cog version {__version__}")
             return
 
-        if self.options.files:
-            for a in self.options.files:
+        if self.options.inputs:
+            for a in self.options.inputs:
                 self.process_arguments([a])
         else:
             raise CogUsageError("No files to process")
