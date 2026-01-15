@@ -1,5 +1,5 @@
 import argparse
-import contextlib
+from contextlib import contextmanager
 import copy
 from enum import Enum, StrEnum, auto
 from fileinput import FileInput, isstdin
@@ -12,6 +12,7 @@ import sys
 from textwrap import dedent
 from types import MethodType
 from typing import (
+    IO,
     ClassVar,
     Dict,
     Iterator,
@@ -84,7 +85,17 @@ class FileListType(StrEnum):
 
 @dataclass(frozen=True)
 class CogInput:
-    filestr: str
+    """
+    A Cog input file reference as specified on the command line.
+
+    Can be a file path, file glob, @filelist, or &filelist_with_chdir.
+
+    Attributes:
+    - filestr: the string file path
+    - filelist_type: the filelist type if applicable (none if this is a plain file or file glob)
+    """
+
+    filepath: str
     filelist_type: FileListType | None = None
 
     @classmethod
@@ -96,9 +107,49 @@ class CogInput:
 
 
 @dataclass(frozen=True)
-class CogResolvedInput:
-    filename: str
+class CogFile:
+    """
+    A specific cog input source with its options.
+
+    Attributes:
+    - name: a path to a file, or `-` for stdin
+    - options: the options to apply to this file
+    """
+
+    name: str
     options: "CogOptions"
+
+    @contextmanager
+    def open_input(self):
+        if self.name == "-":
+            return sys.stdin
+        else:
+            with open(self.name, encoding=self.options.encoding) as f:
+                yield f
+
+    @contextmanager
+    def open_output(self):
+        opts = {}
+        mode = "w"
+        opts["encoding"] = self.options.encoding
+        opts["newline"] = self.options.newline
+
+        match self.options:
+            case CogOptions(output_name=str() as fname, encoding=encoding, newline=newline):
+                with open(fname, encoding=encoding, newline=newline) as f:
+                    yield f
+                
+
+
+        if self.options.output_name:
+            fname = self.options.output_name
+
+
+
+        fdir = os.path.dirname(fname)
+        if os.path.dirname(fdir) and not os.path.exists(fdir):
+            os.makedirs(fdir)
+        return open(fname, mode, **opts)
 
 
 @dataclass(frozen=True)
@@ -348,7 +399,7 @@ class CogOptions:
         if self.diff and not self.check:
             raise CogUsageError("Can't use --diff without --check")
 
-    def resolved_inputs(self) -> Iterator[CogResolvedInput]:
+    def resolve_inputs(self) -> Iterator[CogFile]:
         """
         Get concrete files to process for cog snippets, paired with their options. Resolves FILELIST
         arguments by reading & parsing their lines options.
@@ -359,7 +410,7 @@ class CogOptions:
         for input in self.inputs:
             yield from self._resolve_input(input)
 
-    def _resolve_input(self, input: CogInput) -> Iterator[CogResolvedInput]:
+    def _resolve_input(self, input: CogInput) -> Iterator[CogFile]:
         match input:
             case CogInput(filelist, FileListType.PLAIN):
                 yield from self._resolve_filelist(filelist)
@@ -368,17 +419,16 @@ class CogOptions:
                 from_dir = replace(self, chdir=self.chdir / dir)
                 yield from from_dir._resolve_input(CogInput(name, FileListType.PLAIN))
             case CogInput("-"):
-                yield CogResolvedInput("-", self)
+                yield CogFile("-", self)
             case CogInput(filestr):
                 files = glob.glob(filestr, root_dir=self.chdir) or [filestr]
                 for file in files:
+                    # put
                     dir = os.path.dirname(file)
-                    with_file_dir_included = replace(
-                        self, include_path=self.include_path + [dir]
-                    )
-                    yield CogResolvedInput(file, with_file_dir_included)
+                    with_dir = replace(self, include_path=self.include_path + [dir])
+                    yield CogFile(file, with_dir)
 
-    def _resolve_filelist(self, filelist: str) -> Iterator[CogResolvedInput]:
+    def _resolve_filelist(self, filelist: str) -> Iterator[CogFile]:
         curopts_empty_input = replace(self, inputs=[])
         with open(filelist, encoding=self.encoding) as filelist_in:
             for line in filelist_in:
@@ -386,7 +436,7 @@ class CogOptions:
                 if argv:
                     args = self._parser.parse_args(argv)
                     line_opts = replace(curopts_empty_input, **args.__dict__)
-                    yield from line_opts.resolved_inputs()
+                    yield from line_opts.resolve_inputs()
 
 
 def _lex_filelist_line(line: str) -> list[str]:

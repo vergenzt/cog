@@ -19,7 +19,7 @@ from .errors import (
     CogUsageError,
     CogUserException,
 )
-from .options import CogOptions, CogResolvedInput
+from .options import CogOptions, CogFile
 from .whiteutils import common_prefix, reindent_block, white_prefix
 from .utils import NumberedFileReader, Redirectable, change_dir, md5
 from .hashhandler import HashHandler
@@ -423,17 +423,13 @@ class Cog(Redirectable):
         f.write(new_text)
         f.close()
 
-    def process_one_file(self, file: CogResolvedInput):
+    def process_one_file(self, file: CogFile):
         """Process one filename through cog."""
+        fname = None
 
         need_newline = False
 
         try:
-            self.add_to_include_path(self.options.include_path)
-            # Since we know where the input file came from,
-            # push its directory onto the include path.
-            self.add_to_include_path([os.path.dirname(fname)])
-
             # How we process the file depends on where the output is going.
             if self.options.output_name:
                 self.process_file(fname, self.options.output_name, fname)
@@ -485,24 +481,10 @@ class Cog(Redirectable):
         finally:
             self.restore_include_path()
 
-    def process_file_list(self, file_name_list):
-        """Process the files in a file list."""
-        flist = self.open_input_file(file_name_list)
-        lines = flist.readlines()
-        flist.close()
-        for line in lines:
-            # Use shlex to parse the line like a shell.
-            lex = shlex.shlex(line, posix=True)
-            lex.whitespace_split = True
-            lex.commenters = "#"
-            # No escapes, so that backslash can be part of the path
-            lex.escape = ""
-            args = list(lex)
-            if args:
-                self.process_arguments(args)
-
     def process_arguments(self, args):
         """Process one command-line."""
+
+        options = CogOptions.from_args(args)
         saved_options = self.options
         self.options = self.options.clone()
 
@@ -536,16 +518,17 @@ class Cog(Redirectable):
             self.prerr(CogOptions.format_help(), end="")
             return
 
-        self.options.parse_args(argv)
+        self.options = CogOptions.from_args(argv)
         self._fix_end_output_patterns()
 
         if self.options.show_version:
             self.prout(f"Cog version {__version__}")
             return
 
+
         if self.options.inputs:
-            for a in self.options.inputs:
-                self.process_arguments([a])
+            for input in self.options.resolve_inputs():
+                input
         else:
             raise CogUsageError("No files to process")
 
