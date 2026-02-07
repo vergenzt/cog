@@ -383,26 +383,27 @@ class CogOptions:
         return cls._parser.format_help()
 
     @classmethod
+    def _apply_arg_defaults(cls, kwargs: dict) -> dict:
+        """Apply default values for fields that argparse might leave as None."""
+        if kwargs.get('markers') is None:
+            kwargs['markers'] = Markers("[[[cog", "]]]", "[[[end]]]")
+        if kwargs.get('verbosity') is None:
+            kwargs['verbosity'] = 2
+        if kwargs.get('include_path') is None:
+            kwargs['include_path'] = []
+        if kwargs.get('defines') is None:
+            kwargs['defines'] = {}
+        if kwargs.get('encoding') is None:
+            kwargs['encoding'] = 'utf-8'
+        if kwargs.get('prologue') is None:
+            kwargs['prologue'] = ''
+        return kwargs
+
+    @classmethod
     def from_args(cls, argv: List[str]) -> "CogOptions":
         try:
             args = cls._parser.parse_args(argv)
-            # Fill in None values with defaults from the dataclass
-            kwargs = args.__dict__.copy()
-            
-            # Set defaults for fields that argparse might leave as None
-            if kwargs.get('markers') is None:
-                kwargs['markers'] = Markers("[[[cog", "]]]", "[[[end]]]")
-            if kwargs.get('verbosity') is None:
-                kwargs['verbosity'] = 2
-            if kwargs.get('include_path') is None:
-                kwargs['include_path'] = []
-            if kwargs.get('defines') is None:
-                kwargs['defines'] = {}
-            if kwargs.get('encoding') is None:
-                kwargs['encoding'] = 'utf-8'
-            if kwargs.get('prologue') is None:
-                kwargs['prologue'] = ''
-            
+            kwargs = cls._apply_arg_defaults(args.__dict__.copy())
             return cls(**kwargs)
         except argparse.ArgumentError as err:
             raise CogUsageError(str(err))
@@ -454,17 +455,23 @@ class CogOptions:
 
     def _resolve_filelist(self, filelist: str) -> Iterator[CogFile]:
         curopts_empty_input = replace(self, inputs=[])
+        # Parse empty args to get defaults
+        default_args = self._parser.parse_args([])
+        
         with open(filelist, encoding=self.encoding) as filelist_in:
             for line in filelist_in:
                 argv = _lex_filelist_line(line)
                 if argv:
                     args = self._parser.parse_args(argv)
-                    # Apply defaults for None values
-                    kwargs = args.__dict__.copy()
-                    if kwargs.get('include_path') is None:
-                        kwargs['include_path'] = []
-                    if kwargs.get('defines') is None:
-                        kwargs['defines'] = {}
+                    # Only update fields that differ from defaults (i.e., were explicitly set)
+                    kwargs = {}
+                    for key, value in args.__dict__.items():
+                        default_value = getattr(default_args, key)
+                        if value != default_value or key == 'inputs':
+                            # This field was explicitly set in the filelist line
+                            kwargs[key] = value
+                    # Apply defaults for None values in explicitly set fields
+                    kwargs = self._apply_arg_defaults(kwargs)
                     line_opts = replace(curopts_empty_input, **kwargs)
                     yield from line_opts.resolve_inputs()
 
