@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import threading
+from dataclasses import replace
 from unittest import TestCase
 
 from .cogapp import Cog, CogOptions, CogGenerator
@@ -475,20 +476,21 @@ class CogOptionsTests(TestCase):
         o = CogOptions()
         p = CogOptions()
         self.assertEqual(o, p)
-        o.parse_args(["-r"])
+        o = CogOptions.from_args(["-r"])
         self.assertNotEqual(o, p)
-        p.parse_args(["-r"])
+        p = CogOptions.from_args(["-r"])
         self.assertEqual(o, p)
 
     def test_cloning(self):
-        o = CogOptions()
-        o.parse_args(["-I", "fooey", "-I", "booey", "-s", " /*x*/"])
-        p = o.clone()
+        o = CogOptions.from_args(["-I", "fooey", "-I", "booey", "-s", " /*x*/"])
+        # With frozen dataclasses, we use replace() instead of clone()
+        p = replace(o)
         self.assertEqual(o, p)
-        p.parse_args(["-I", "huey", "-D", "foo=quux"])
+        # Add new include path and define (converted to absolute path to match argparse behavior)
+        import os
+        p = replace(o, include_path=o.include_path + [os.path.abspath("huey")], defines={**o.defines, "foo": "quux"})
         self.assertNotEqual(o, p)
-        q = CogOptions()
-        q.parse_args(
+        q = CogOptions.from_args(
             [
                 "-I",
                 "fooey",
@@ -506,10 +508,8 @@ class CogOptionsTests(TestCase):
 
     def test_combining_flags(self):
         # Single-character flags can be combined.
-        o = CogOptions()
-        o.parse_args(["-e", "-r", "-z"])
-        p = CogOptions()
-        p.parse_args(["-erz"])
+        o = CogOptions.from_args(["-e", "-r", "-z"])
+        p = CogOptions.from_args(["-erz"])
         self.assertEqual(o, p)
 
     def test_markers(self):
@@ -519,8 +519,7 @@ class CogOptionsTests(TestCase):
         self.assertEqual("c", o.end_output)
 
     def test_markers_switch(self):
-        o = CogOptions()
-        o.parse_args(["--markers", "a b c"])
+        o = CogOptions.from_args(["--markers", "a b c"])
         self.assertEqual("a", o.begin_spec)
         self.assertEqual("b", o.end_spec)
         self.assertEqual("c", o.end_output)
@@ -2771,7 +2770,9 @@ class BlakeTests(TestCaseWithTempDir):
         make_files(d)
         globals = {}
         globals["fnames"] = ["DoBlake", "DoWinton", "DoContribution"]
-        self.cog.options.delete_code = True
+        # Use replace to create new options with delete_code=True
+        from dataclasses import replace
+        self.cog.options = replace(self.cog.options, delete_code=True)
         self.cog.process_file("test.cog", "test.cogged", globals=globals)
         self.assertFilesSame("test.cogged", "test.out")
 

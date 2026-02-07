@@ -6,6 +6,7 @@ import glob
 import io
 import linecache
 import os
+from pathlib import Path
 import re
 import shlex
 import sys
@@ -140,6 +141,7 @@ class Cog(Redirectable):
 
     def __init__(self):
         super().__init__()
+        self.options = CogOptions()
         self.cogmodulename = "cog"
         self.create_cog_module()
         self.check_failed = False
@@ -180,6 +182,13 @@ class Cog(Redirectable):
         if os.path.dirname(fdir) and not os.path.exists(fdir):
             os.makedirs(fdir)
         return open(fname, mode, **opts)
+
+    def open_input_file(self, fname):
+        """Open an input file."""
+        if fname == "-":
+            return sys.stdin
+        else:
+            return open(fname, encoding=self.options.encoding)
 
     def process_file(self, file_in, file_out, fname=None, globals=None):
         """Process an input file object to an output file object.
@@ -424,12 +433,24 @@ class Cog(Redirectable):
         f.close()
 
     def process_one_file(self, file: CogFile):
-        """Process one filename through cog."""
-        fname = None
-
-        need_newline = False
-
+        """Process one filename through cog with file-specific options."""
+        fname = file.name
+        
+        # Save current options and use file-specific options
+        saved_options = self.options
+        saved_sys_path = sys.path[:]
+        saved_cogmodule_path = self.cogmodule.path[:]
+        
         try:
+            self.options = file.options
+            self._fix_end_output_patterns()
+            
+            # Set up include path for this file
+            self.cogmodule.path = file.options.include_path[:]
+            sys.path = sys.path[:] + file.options.include_path
+
+            need_newline = False
+
             # How we process the file depends on where the output is going.
             if self.options.output_name:
                 self.process_file(fname, self.options.output_name, fname)
@@ -442,9 +463,13 @@ class Cog(Redirectable):
                     need_newline = True
 
                 try:
-                    file_old_file = self.open_input_file(fname)
+                    if fname == "-":
+                        file_old_file = sys.stdin
+                    else:
+                        file_old_file = open(fname, encoding=self.options.encoding)
                     old_text = file_old_file.read()
-                    file_old_file.close()
+                    if fname != "-":
+                        file_old_file.close()
                     new_text = self.process_string(old_text, fname=fname)
                     if old_text != new_text:
                         if self.options.verbosity >= 1:
@@ -479,31 +504,11 @@ class Cog(Redirectable):
             else:
                 self.process_file(fname, self.stdout, fname)
         finally:
-            self.restore_include_path()
-
-    def process_arguments(self, args):
-        """Process one command-line."""
-
-        options = CogOptions.from_args(args)
-        saved_options = self.options
-        self.options = self.options.clone()
-
-        self.options.parse_args(args[1:])
-
-        if args[0][0] == "@":
-            if self.options.output_name:
-                raise CogUsageError("Can't use -o with @file")
-            self.process_file_list(args[0][1:])
-        elif args[0][0] == "&":
-            if self.options.output_name:
-                raise CogUsageError("Can't use -o with &file")
-            file_list = args[0][1:]
-            with change_dir(os.path.dirname(file_list)):
-                self.process_file_list(os.path.basename(file_list))
-        else:
-            self.process_wildcards(args[0])
-
-        self.options = saved_options
+            # Restore original options and paths
+            self.options = saved_options
+            sys.path = saved_sys_path
+            self.cogmodule.path = saved_cogmodule_path
+            self._fix_end_output_patterns()
 
     def callable_main(self, argv):
         """All of command-line cog, but in a callable form.
@@ -525,10 +530,17 @@ class Cog(Redirectable):
             self.prout(f"Cog version {__version__}")
             return
 
-
         if self.options.inputs:
-            for input in self.options.resolve_inputs():
-                input
+            # Change to the specified directory if needed
+            start_dir = os.getcwd()
+            try:
+                if self.options.chdir and self.options.chdir != Path("."):
+                    os.chdir(self.options.chdir)
+                
+                for file in self.options.resolve_inputs():
+                    self.process_one_file(file)
+            finally:
+                os.chdir(start_dir)
         else:
             raise CogUsageError("No files to process")
 
