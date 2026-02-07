@@ -451,11 +451,11 @@ class CogOptions:
                     # Calculate the directory of the file, relative to current working dir
                     if self.chdir and self.chdir != Path("."):
                         full_path = self.chdir / file
-                        dir = str(full_path.parent)
+                        file_dir = str(full_path.parent)
                     else:
-                        dir = os.path.dirname(file)
+                        file_dir = os.path.dirname(file)
                     # Always add directory to include path (even if empty, it means current dir)
-                    with_dir = replace(self, include_path=self.include_path + [dir])
+                    with_dir = replace(self, include_path=self.include_path + [file_dir])
                     yield CogFile(file, with_dir)
 
     def _resolve_filelist(self, filelist: str) -> Iterator[CogFile]:

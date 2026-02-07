@@ -2771,7 +2771,6 @@ class BlakeTests(TestCaseWithTempDir):
         globals = {}
         globals["fnames"] = ["DoBlake", "DoWinton", "DoContribution"]
         # Use replace to create new options with delete_code=True
-        from dataclasses import replace
         self.cog.options = replace(self.cog.options, delete_code=True)
         self.cog.process_file("test.cog", "test.cogged", globals=globals)
         self.assertFilesSame("test.cogged", "test.out")
