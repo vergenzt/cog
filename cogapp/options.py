@@ -448,8 +448,13 @@ class CogOptions:
             case CogInput(filestr):
                 files = glob.glob(filestr, root_dir=self.chdir) or [filestr]
                 for file in files:
-                    # put
-                    dir = os.path.dirname(file)
+                    # Calculate the directory of the file, relative to current working dir
+                    if self.chdir and self.chdir != Path("."):
+                        full_path = self.chdir / file
+                        dir = str(full_path.parent)
+                    else:
+                        dir = os.path.dirname(file)
+                    # Always add directory to include path (even if empty, it means current dir)
                     with_dir = replace(self, include_path=self.include_path + [dir])
                     yield CogFile(file, with_dir)
 
@@ -458,7 +463,9 @@ class CogOptions:
         # Parse empty args to get defaults
         default_args = self._parser.parse_args([])
         
-        with open(filelist, encoding=self.encoding) as filelist_in:
+        # Open the filelist relative to self.chdir
+        filelist_path = self.chdir / filelist if self.chdir != Path(".") else Path(filelist)
+        with open(filelist_path, encoding=self.encoding) as filelist_in:
             for line in filelist_in:
                 argv = _lex_filelist_line(line)
                 if argv:
@@ -469,9 +476,16 @@ class CogOptions:
                         default_value = getattr(default_args, key)
                         if value != default_value or key == 'inputs':
                             # This field was explicitly set in the filelist line
+                            # Only apply defaults for None if this is a required field
+                            if value is None and key in ('markers', 'encoding', 'prologue'):
+                                # These must have values, use defaults
+                                if key == 'markers':
+                                    value = Markers("[[[cog", "]]]", "[[[end]]]")
+                                elif key == 'encoding':
+                                    value = 'utf-8'
+                                elif key == 'prologue':
+                                    value = ''
                             kwargs[key] = value
-                    # Apply defaults for None values in explicitly set fields
-                    kwargs = self._apply_arg_defaults(kwargs)
                     line_opts = replace(curopts_empty_input, **kwargs)
                     yield from line_opts.resolve_inputs()
 

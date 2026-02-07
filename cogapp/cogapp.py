@@ -435,6 +435,11 @@ class Cog(Redirectable):
     def process_one_file(self, file: CogFile):
         """Process one filename through cog with file-specific options."""
         fname = file.name
+        # Build the full path relative to the file's chdir
+        if file.options.chdir and file.options.chdir != Path("."):
+            full_fname = str(file.options.chdir / fname)
+        else:
+            full_fname = fname
         
         # Save current options and use file-specific options
         saved_options = self.options
@@ -453,7 +458,7 @@ class Cog(Redirectable):
 
             # How we process the file depends on where the output is going.
             if self.options.output_name:
-                self.process_file(fname, self.options.output_name, fname)
+                self.process_file(full_fname, self.options.output_name, fname)
             elif self.options.replace or self.options.check:
                 # We want to replace the cog file with the output,
                 # but only if they differ.
@@ -466,7 +471,7 @@ class Cog(Redirectable):
                     if fname == "-":
                         file_old_file = sys.stdin
                     else:
-                        file_old_file = open(fname, encoding=self.options.encoding)
+                        file_old_file = open(full_fname, encoding=self.options.encoding)
                     old_text = file_old_file.read()
                     if fname != "-":
                         file_old_file.close()
@@ -478,7 +483,7 @@ class Cog(Redirectable):
                             self.prout("  (changed)")
                             need_newline = False
                         if self.options.replace:
-                            self.replace_file(fname, new_text)
+                            self.replace_file(full_fname, new_text)
                         else:
                             assert self.options.check
                             self.check_failed = True
@@ -502,7 +507,7 @@ class Cog(Redirectable):
                     if need_newline:
                         self.prout("")
             else:
-                self.process_file(fname, self.stdout, fname)
+                self.process_file(full_fname, self.stdout, fname)
         finally:
             # Restore original options and paths
             self.options = saved_options
