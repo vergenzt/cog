@@ -58,7 +58,11 @@ class _UpdateDictAction(argparse.Action):
         super().__init__(*a, **kw, type=self._parse_define)
 
     def __call__(self, _parser, ns, arg, _option_string=None):
-        getattr(ns, self.dest).update([arg])
+        dest_dict = getattr(ns, self.dest)
+        if dest_dict is None:
+            dest_dict = {}
+            setattr(ns, self.dest, dest_dict)
+        dest_dict.update([arg])
 
 
 @dataclass(frozen=True)
@@ -129,27 +133,30 @@ class CogFile:
 
     @contextmanager
     def open_output(self):
+        """Open an output file for this CogFile, creating directories if needed."""
         opts = {}
         mode = "w"
         opts["encoding"] = self.options.encoding
         opts["newline"] = self.options.newline
 
-        match self.options:
-            case CogOptions(output_name=str() as fname, encoding=encoding, newline=newline):
-                with open(fname, encoding=encoding, newline=newline) as f:
-                    yield f
-                
-
-
         if self.options.output_name:
             fname = self.options.output_name
-
-
-
-        fdir = os.path.dirname(fname)
-        if os.path.dirname(fdir) and not os.path.exists(fdir):
-            os.makedirs(fdir)
-        return open(fname, mode, **opts)
+            fdir = os.path.dirname(fname)
+            if fdir and not os.path.exists(fdir):
+                os.makedirs(fdir)
+            with open(fname, mode, **opts) as f:
+                yield f
+        else:
+            # Output to same file as input (for replace mode) or stdout
+            fname = self.name if self.name != "-" else None
+            if fname:
+                fdir = os.path.dirname(fname)
+                if fdir and not os.path.exists(fdir):
+                    os.makedirs(fdir)
+                with open(fname, mode, **opts) as f:
+                    yield f
+            else:
+                yield sys.stdout
 
 
 @dataclass(frozen=True)
@@ -376,10 +383,28 @@ class CogOptions:
         return cls._parser.format_help()
 
     @classmethod
+    def _apply_arg_defaults(cls, kwargs: dict) -> dict:
+        """Apply default values for fields that argparse might leave as None."""
+        if kwargs.get('markers') is None:
+            kwargs['markers'] = Markers("[[[cog", "]]]", "[[[end]]]")
+        if kwargs.get('verbosity') is None:
+            kwargs['verbosity'] = 2
+        if kwargs.get('include_path') is None:
+            kwargs['include_path'] = []
+        if kwargs.get('defines') is None:
+            kwargs['defines'] = {}
+        if kwargs.get('encoding') is None:
+            kwargs['encoding'] = 'utf-8'
+        if kwargs.get('prologue') is None:
+            kwargs['prologue'] = ''
+        return kwargs
+
+    @classmethod
     def from_args(cls, argv: List[str]) -> "CogOptions":
         try:
             args = cls._parser.parse_args(argv)
-            return cls(**args.__dict__)
+            kwargs = cls._apply_arg_defaults(args.__dict__.copy())
+            return cls(**kwargs)
         except argparse.ArgumentError as err:
             raise CogUsageError(str(err))
 
@@ -423,19 +448,45 @@ class CogOptions:
             case CogInput(filestr):
                 files = glob.glob(filestr, root_dir=self.chdir) or [filestr]
                 for file in files:
-                    # put
-                    dir = os.path.dirname(file)
-                    with_dir = replace(self, include_path=self.include_path + [dir])
+                    # Calculate the directory of the file, relative to current working dir
+                    if self.chdir and self.chdir != Path("."):
+                        full_path = self.chdir / file
+                        file_dir = str(full_path.parent)
+                    else:
+                        file_dir = os.path.dirname(file)
+                    # Always add directory to include path (even if empty, it means current dir)
+                    with_dir = replace(self, include_path=self.include_path + [file_dir])
                     yield CogFile(file, with_dir)
 
     def _resolve_filelist(self, filelist: str) -> Iterator[CogFile]:
         curopts_empty_input = replace(self, inputs=[])
-        with open(filelist, encoding=self.encoding) as filelist_in:
+        # Parse empty args to get defaults
+        default_args = self._parser.parse_args([])
+        
+        # Open the filelist relative to self.chdir
+        filelist_path = self.chdir / filelist if self.chdir != Path(".") else Path(filelist)
+        with open(filelist_path, encoding=self.encoding) as filelist_in:
             for line in filelist_in:
                 argv = _lex_filelist_line(line)
                 if argv:
                     args = self._parser.parse_args(argv)
-                    line_opts = replace(curopts_empty_input, **args.__dict__)
+                    # Only update fields that differ from defaults (i.e., were explicitly set)
+                    kwargs = {}
+                    for key, value in args.__dict__.items():
+                        default_value = getattr(default_args, key)
+                        if value != default_value or key == 'inputs':
+                            # This field was explicitly set in the filelist line
+                            # Only apply defaults for None if this is a required field
+                            if value is None and key in ('markers', 'encoding', 'prologue'):
+                                # These must have values, use defaults
+                                if key == 'markers':
+                                    value = Markers("[[[cog", "]]]", "[[[end]]]")
+                                elif key == 'encoding':
+                                    value = 'utf-8'
+                                elif key == 'prologue':
+                                    value = ''
+                            kwargs[key] = value
+                    line_opts = replace(curopts_empty_input, **kwargs)
                     yield from line_opts.resolve_inputs()
 
 
